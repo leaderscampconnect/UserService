@@ -7,14 +7,13 @@ spring:
 server:
   port: 8110
 
-spring:
-  datasource:
+datasource:
     url: jdbc:mysql://localhost:3306/campconnect_user_service?createDatabaseIfNotExist=true
     username: root
     password:
     driver-class-name: com.mysql.cj.jdbc.Driver
 
-  jpa:
+jpa:
     hibernate:
       ddl-auto: update
     show-sql: true
@@ -23,7 +22,7 @@ spring:
       hibernate:
         format_sql: true
 
-  mail:
+mail:
     host: smtp.gmail.com
     port: 587
     username: samaalichayyma@gmail.com
@@ -48,3 +47,43 @@ logging:
   level:
     com.campconnect.userservice.feign: DEBUG
     org.springframework.mail: DEBUG
+
+  # ─── RabbitMQ ─────────────────────────────────────────────
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: 5672
+    username: ${RABBITMQ_USER:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    virtual-host: /
+    listener:
+      simple:
+        retry:
+          enabled: true
+          initial-interval: 1000ms
+          max-attempts: 3
+          multiplier: 2.0
+
+  # ─── Kafka ────────────────────────────────────────────────
+  kafka:
+    bootstrap-servers: ${KAFKA_HOST:localhost}:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      retries: 3
+    consumer:
+      group-id: user-service-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "*"
+
+# ─── Actuator ─────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
