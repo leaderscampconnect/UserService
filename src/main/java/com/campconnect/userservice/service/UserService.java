@@ -3,18 +3,24 @@ package com.campconnect.userservice.service;
 import com.campconnect.userservice.dto.*;
 import com.campconnect.userservice.entity.*;
 import com.campconnect.userservice.entity.User.UserRole;
+import com.campconnect.userservice.event.UserEvent;
 import com.campconnect.userservice.exception.UserNotFoundException;
 import com.campconnect.userservice.feign.*;
+import com.campconnect.userservice.messaging.kafka.UserKafkaProducer;
+import com.campconnect.userservice.messaging.rabbitmq.UserEventPublisher;
 import com.campconnect.userservice.repository.*;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class UserService {
 
     private final UserRepository userRepository;
@@ -22,6 +28,10 @@ public class UserService {
     private final PasswordEncoder passwordEncoder;
     private final EmailService emailService;
     private final CampSiteClient campSiteClient;
+
+    // ─── Messaging ────────────────────────────────────────────
+    private final UserEventPublisher rabbitPublisher;
+    private final UserKafkaProducer kafkaProducer;
 
     // ─── CRUD ────────────────────────────────────────────────
 
@@ -45,15 +55,28 @@ public class UserService {
         if (userRepository.existsByEmail(request.getEmail())) {
             throw new IllegalArgumentException("Email déjà utilisé : " + request.getEmail());
         }
+
         User user = User.builder()
                 .firstName(request.getFirstName())
                 .lastName(request.getLastName())
                 .email(request.getEmail())
-                .password(passwordEncoder.encode(request.getPassword())) // ← haché
+                .password(passwordEncoder.encode(request.getPassword()))
                 .phone(request.getPhone())
                 .role(request.getRole() != null ? request.getRole() : UserRole.CAMPER)
                 .build();
-        return toResponse(userRepository.save(user));
+
+        User saved = userRepository.save(user);
+        log.info("Utilisateur créé : id={}", saved.getId());
+
+        // ─── Publier l'événement ──────────────────────────────
+        UserEvent event = UserEvent.created(
+                saved.getId(), saved.getFirstName(), saved.getLastName(),
+                saved.getEmail(), saved.getPhone(), saved.getRole()
+        );
+        rabbitPublisher.publishUserCreated(event);
+        kafkaProducer.sendUserCreated(event);
+
+        return toResponse(saved);
     }
 
     public UserResponse updateUser(Long id, UserRequest request) {
@@ -71,18 +94,37 @@ public class UserService {
         user.setPhone(request.getPhone());
         if (request.getRole() != null) user.setRole(request.getRole());
 
-        // Hacher le nouveau mot de passe seulement s'il est fourni
         if (request.getPassword() != null && !request.getPassword().isBlank()) {
             user.setPassword(passwordEncoder.encode(request.getPassword()));
         }
 
-        return toResponse(userRepository.save(user));
+        User saved = userRepository.save(user);
+        log.info("Utilisateur mis à jour : id={}", saved.getId());
+
+        // ─── Publier l'événement ──────────────────────────────
+        UserEvent event = UserEvent.updated(
+                saved.getId(), saved.getFirstName(), saved.getLastName(),
+                saved.getEmail(), saved.getPhone(), saved.getRole()
+        );
+        rabbitPublisher.publishUserUpdated(event);
+        kafkaProducer.sendUserUpdated(event);
+
+        return toResponse(saved);
     }
 
     public void deleteUser(Long id) {
-        if (!userRepository.existsById(id)) throw new UserNotFoundException(id);
+        User user = userRepository.findById(id)
+                .orElseThrow(() -> new UserNotFoundException(id));
+
+        String email = user.getEmail();
         tokenRepository.deleteByUserId(id);
         userRepository.deleteById(id);
+        log.info("Utilisateur supprimé : id={}", id);
+
+        // ─── Publier l'événement ──────────────────────────────
+        UserEvent event = UserEvent.deleted(id, email);
+        rabbitPublisher.publishUserDeleted(event);
+        kafkaProducer.sendUserDeleted(event);
     }
 
     public List<UserResponse> getUsersByRole(UserRole role) {
@@ -97,10 +139,8 @@ public class UserService {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new UserNotFoundException(email));
 
-        // Supprimer les anciens tokens
         tokenRepository.deleteByUserId(user.getId());
 
-        // Générer un code à 6 chiffres
         String code = String.format("%06d", new Random().nextInt(999999));
 
         PasswordResetToken resetToken = PasswordResetToken.builder()
@@ -111,13 +151,14 @@ public class UserService {
                 .build();
 
         tokenRepository.save(resetToken);
-
-        // Envoyer l'email
         emailService.sendResetPasswordEmail(email, code);
 
-        return Map.of(
-                "message", "Code de réinitialisation envoyé à " + email
-        );
+        // ─── Publier l'événement ──────────────────────────────
+        UserEvent event = UserEvent.passwordReset(user.getId(), email);
+        rabbitPublisher.publishPasswordReset(event);
+        kafkaProducer.sendPasswordReset(event);
+
+        return Map.of("message", "Code de réinitialisation envoyé à " + email);
     }
 
     public Map<String, String> resetPassword(ResetPasswordRequest request) {
