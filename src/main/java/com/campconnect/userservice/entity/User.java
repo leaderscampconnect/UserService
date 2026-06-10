@@ -60,9 +60,10 @@ public class User {
     }
 
     public enum UserRole {
-        CAMPER,           // campeur
-        SITE_OWNER,       // propriétaire de site
-        ORGANIZER         // organisateur d'événement
+        CAMPER,
+        SITE_OWNER,
+        ORGANIZER,
+        ADMIN
     }
 
     public String getEmail() {
